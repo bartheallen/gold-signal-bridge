@@ -1,9 +1,15 @@
 // api/webhook.js
 // Recoit les messages du Bot Telegram (webhook Telegram -> Vercel).
-// Parse le signal (regles, puis IA cloud gratuite en secours) et le
-// stocke dans Vercel KV pour que l'EA MT5 vienne le chercher ensuite.
+// Parse le signal (regles, puis IA cloud gratuite en secours) et
+// l'enregistre dans Supabase (Postgres, plan gratuit) pour que l'EA
+// MT5 vienne le chercher ensuite.
 
-import { kv } from '@vercel/kv';
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY // cle "service_role", jamais exposee au client
+);
 
 const SYMBOL_ALIASES = { GOLD: 'XAUUSD', OR: 'XAUUSD', XAUUSD: 'XAUUSD', 'XAU/USD': 'XAUUSD', XAU: 'XAUUSD' };
 const ACTION_ALIASES = { BUY: 'BUY', LONG: 'BUY', ACHAT: 'BUY', ACHETER: 'BUY', SELL: 'SELL', SHORT: 'SELL', VENTE: 'SELL', VENDRE: 'SELL' };
@@ -44,9 +50,6 @@ function parseWithRules(text) {
 }
 
 async function parseWithAI(text) {
-  // Fournisseur d'IA cloud a plan gratuit (exemple : Groq). Verifie les
-  // conditions actuelles (limites, gratuite) sur le site du fournisseur,
-  // ces politiques peuvent changer. Configurable via variables d'env.
   const apiKey = process.env.AI_API_KEY;
   const apiUrl = process.env.AI_API_URL || 'https://api.groq.com/openai/v1/chat/completions';
   const model = process.env.AI_MODEL || 'llama-3.1-8b-instant';
@@ -85,7 +88,6 @@ Message: """${text}"""`;
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(200).send('OK');
 
-  // Verification simple : Telegram peut envoyer un secret dans l'URL du webhook
   if (process.env.WEBHOOK_SECRET && req.query.secret !== process.env.WEBHOOK_SECRET) {
     return res.status(401).send('unauthorized');
   }
@@ -105,21 +107,25 @@ export default async function handler(req, res) {
   }
 
   if (signal) {
-    const nextId = await kv.incr('signal_seq');
-    const record = {
-      id: nextId,
-      msg_id: msgId,
-      time: new Date().toISOString(),
-      symbol: signal.symbol,
-      action: signal.action,
-      entry: signal.entry || 0,
-      sl: signal.sl,
-      tp: signal.tp || [],
-      parsed_by: parsedBy,
-    };
-    await kv.rpush('signals_queue', JSON.stringify(record));
-    await kv.ltrim('signals_queue', -500, -1); // garde au max les 500 derniers signaux
-    console.log('Signal stocke:', record);
+    const { data, error } = await supabase
+      .from('signals')
+      .insert({
+        msg_id: msgId,
+        symbol: signal.symbol,
+        action: signal.action,
+        entry: signal.entry || 0,
+        sl: signal.sl,
+        tp: signal.tp || [],
+        parsed_by: parsedBy,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Erreur insertion Supabase:', error);
+    } else {
+      console.log('Signal stocke:', data);
+    }
   } else {
     console.log('Message ignore (non reconnu comme signal):', text.slice(0, 80));
   }
